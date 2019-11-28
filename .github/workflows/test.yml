@@ -1,0 +1,39 @@
+name: Test Checks API
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+  push:
+    branches:
+      - master
+
+jobs:
+  lint_all_job:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # Several Python versions can be specified: all tests will be rerun for every version
+        # Useful when migrating from one Python version to the next
+        python-version: [3.8]
+    steps:
+
+      - name: Dump event JSON
+        run: cat "$GITHUB_EVENT_PATH"
+
+      - uses: actions/checkout@v1
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v1
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install
+        run: pip install -r requirements.txt
+
+      - name: Lint
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python github_actions.py lint_all_gh
