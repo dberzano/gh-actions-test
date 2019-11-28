@@ -49,8 +49,8 @@ class GhRequests:
 
 
 GH_EVENT = CachedGitHubActionEvent()
-GH = Github(os.environ["GITHUB_TOKEN"])
-GH_REQ = GhRequests(os.environ["GITHUB_TOKEN"])
+GH = Github(os.environ.get("GITHUB_TOKEN", ""))
+GH_REQ = GhRequests(os.environ.get("GITHUB_TOKEN", ""))
 JIRA_URL = "https://yabba.atlassian.net/browse"
 WIP_CONTEXT = "Draft"
 WIP_LABEL = "draft"
@@ -203,11 +203,20 @@ def lint_all():
     return lint(["*.py", "*.ipynb"])
 
 
-def lint(ext, checks_api=True):
+def lint_all_gh():
+    """Lint everything (Python scripts and notebooks) on the GitHub platform.
+
+    This is meant to be used at GitHub Actions level because it reports errors as annotations.
+    """
+    return lint(["*.py", "*.ipynb"], checks_api=True)
+
+
+def lint(ext, checks_api=False):
     """Use linters to lint all the specified extensions."""
     if checks_api:
         use_linters = ["flake8-json"]
         annotations = []
+        check_details = ""
     else:
         use_linters = ["flake8-plain"]
 
@@ -256,42 +265,54 @@ def lint(ext, checks_api=True):
                     # Assume JSON output
                     linter_out = json.loads(out)
                     linter_out = linter_out[list(linter_out.keys())[0]]
-                    for li in linter_out:
-                        # https://developer.github.com/v3/checks/runs/#annotations-object
-                        annotations.append({
-                            "path": fn,
-                            "start_line": li["line_number"],
-                            "end_line": li["line_number"],
-                            "start_column": li["column_number"],
-                            "end_column": li["column_number"],
-                            # PEP-8: errors; all the rest: warnings
-                            "annotation_level": "failure" if li["code"][0] in "EW" else "warning",
-                            # "title": "Flake8",
-                            "message": f"{li['code']}: {li['text']}"
-                        })
+
+                    if fn.endswith(".ipynb"):
+                        # We cannot annotate notebooks, write output in details
+                        check_details += f"\n## {fn}\n"
+                        for li in linter_out:
+                            check_details += f"Around line {li['line_number']}:\n\n" \
+                                             f"    {li['physical_line']}\n\n" \
+                                             f"**{li['code']}:** {li['text']}\n\n"
+                    else:
+                        # Ordinary Python files: annotate
+                        for li in linter_out:
+                            # https://developer.github.com/v3/checks/runs/#annotations-object
+                            annotations.append({
+                                "path": fn,
+                                "start_line": li["line_number"],
+                                "end_line": li["line_number"],
+                                "start_column": li["column_number"],
+                                "end_column": li["column_number"],
+                                # PEP-8: errors; all the rest: warnings
+                                "annotation_level": "failure" if li["code"][0] in "EW"
+                                                    else "warning",
+                                # "title": "Flake8",
+                                "message": f"{li['code']}: {li['text']}"
+                            })
                 else:
                     print("\n" + out.strip("\n") + "\n")
                 bad[fn] = bad.get(fn, []) + [linter_name]
 
     rmtree(tempdir)  # cleanup
 
+    if checks_api:
+        if check_details:
+            check_details = "# Errors in notebooks\n" + check_details
+        check_summary = "Python code linted using [Flake8](http://flake8.pycqa.org/)."
+        annotate_check("flake8", "Flake8", not bool(bad), check_summary, check_details, annotations)
+
     if bad:
         print("\nProblems found in the following files:")
         for fn, linters in bad.items():
             print(f"    {fn} ({', '.join(linters)})")
         print()
-        if checks_api:
-            annotate_check("flake8", False, annotations)
-            print(json.dumps(annotations, indent=4))
         return 1
-    elif checks_api:
-        annotate_check("flake8", True, [])
 
     print("\nEvery file linted successfully")
     return 0
 
 
-def annotate_check(check_name, success, annotations):
+def annotate_check(check_name, check_title, success, summary, details, annotations):
     """Use the GitHub Checks API to add annotations for the given check.
 
     A new check is created. We respect the limit of 50 annotations per call. Use `success` to
@@ -299,26 +320,35 @@ def annotate_check(check_name, success, annotations):
 
     Note that PyGithub does not support the Checks API, we therefore use requests.
     """
-    sha = GH_EVENT()["pull_request"]["head"]["sha"]
-    repo_url = GH_EVENT()["pull_request"]["head"]["repo"]["url"]
+    if "pull_request" in GH_EVENT():
+        # Pull request
+        repo_url = GH_EVENT()["pull_request"]["head"]["repo"]["url"]
+        sha = GH_EVENT()["pull_request"]["head"]["sha"]
+    else:
+        # Push event maybe (i.e. when checking master)
+        org = GH_EVENT()["repository"]["organization"]
+        repo = GH_EVENT()["repository"]["name"]
+        repo_url = f"https://api.github.com/repos/{org}/{repo}"
+        sha = GH_EVENT()["head_commit"]["id"]
     check_url = f"{repo_url}/check-runs"
 
     post_data = {
-        "name": "flake8",
+        "name": check_name,
         "head_sha": sha,
         "status": "completed",
         "conclusion": "success" if success else "failure",
         "output": {
             # https://developer.github.com/v3/checks/runs/#output-object
-            "title": "Flake8",
-            "summary": "Python code linted using [Flake8](http://flake8.pycqa.org/).",
-            # "text": "details here",
+            "title": check_title,  # no markdown
+            "summary": summary,  # markdown
+            "text": details,  # markdown
             "annotations": annotations
         }
     }
+    if not details:
+        del post_data["output"]["text"]  # no details box instead of empty box
 
     resp = GH_REQ.post(check_url, post_data)
-    print(resp.text)
     resp.raise_for_status()
 
 

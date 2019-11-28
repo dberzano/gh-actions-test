@@ -36,4 +36,4 @@ jobs:
       - name: Lint
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: python github_actions.py lint_all
+        run: python github_actions.py lint_all_gh
